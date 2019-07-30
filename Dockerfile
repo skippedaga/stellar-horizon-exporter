@@ -6,4 +6,4 @@ COPY ./README.md /opt/stellar-horizon-exporter/
 COPY ./stellar-horizon-exporter.py /opt/stellar-horizon-exporter/
 WORKDIR /opt/stellar-horizon-exporter
 
-ENTRYPOINT ["python3", "stellar-horizon-exporter.py"]
+ENTRYPOINT ["python", "stellar-horizon-exporter.py"]
