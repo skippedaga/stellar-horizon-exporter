@@ -1,127 +1,101 @@
-from prometheus_client import start_http_server, Metric, REGISTRY
+from prometheus_client import start_http_server
+from prometheus_client.core import SummaryMetricFamily, CounterMetricFamily, GaugeMetricFamily, REGISTRY
 import argparse
 import json
 import logging
 import sys
 import time
-from stellar_base.horizon import horizon_livenet
+from stellar_base.horizon import Horizon 
 from collections import defaultdict
 import copy
 import requests
 
 # logging setup
 log = logging.getLogger('stellar-horizon-exporter')
-log.setLevel(logging.INFO)
+log.setLevel(logging.DEBUG)
 ch = logging.StreamHandler(sys.stdout)
-ch.setLevel(logging.INFO)
+ch.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 ch.setFormatter(formatter)
 log.addHandler(ch)
 
+current_data = defaultdict(lambda: 0)
+current_payment_detail = defaultdict(lambda: defaultdict(lambda: 0))
+current_large_native_payment_detail = defaultdict(lambda: defaultdict(lambda: 0))
+
+current_minute = None
 
 class StatsCollector():
 
   def collect(self):
 
-    for k,v in previous_data.items():
-      metric = Metric(k, 'stellar base metric values', 'summary')
-      metric.add_sample(k, value=float(v), labels={'name': 'horizon.stellar.org'})
-      yield metric
-    metric = Metric('payment_detail', 'stellar payment metric values', 'gauge')
-    for asset, asset_data in previous_payment_detail.items():
-          metric.add_sample('sum_payment', value=asset_data['sum'], labels={'asset': asset})
-          metric.add_sample('nb_payment', value=asset_data['nb'], labels={'asset': asset})
-    yield metric
-    metric = Metric('large_native_payment_detail', 'large native stellar payment metric values', 'gauge')
-    for from_addr, amount_by_dest in previous_large_native_payment_detail.items():
+    yield SummaryMetricFamily('summary', 'This is simple summary', labels={'name': 'horizon.stellar.org'})
+
+    log.info('current_data.items(): %s' %current_data.items())
+
+    for k,v in current_data.items():
+      yield CounterMetricFamily(k, 'stellar base metric values', value=float(v))
+
+    log.info('current_payment_detail.items(): %s' %current_payment_detail.items())  
+
+    for asset, asset_data in current_payment_detail.items():
+      summ = CounterMetricFamily('sum_payment', 'stellar payment metric values', labels=['sum_payment'])
+      summ.add_metric(asset, asset_data['sum'])
+      yield summ
+      yield CounterMetricFamily('nb_payment', 'stellar payment metric values', value=float(asset_data['nm'])) 
+    
+    metric = GaugeMetricFamily('large_native_payment_detail', 'large native stellar payment metric values', value=7)
+    for from_addr, amount_by_dest in current_large_native_payment_detail.items():
         for to_addr, amount in amount_by_dest.items():
             metric.add_sample('sum_large_native_payment', value=amount, labels={'from_addr': from_addr, 'to_addr': to_addr})
     yield metric
 
+def main_loop(server):
 
-def main_loop():
+    horizon = Horizon(server);
+    operations = horizon.operations()
 
-    LARGE_PAYMENT_MIN_AMOUNT = 10000
+    global current_minute
 
-    global previous_data
-    previous_data = defaultdict(lambda: 0)
-    
-    global previous_payment_detail
-    previous_payment_detail = defaultdict(lambda: defaultdict(lambda: 0))
-    
-    global previous_large_native_payment_detail
-    previous_large_native_payment_detail = defaultdict(lambda: defaultdict(lambda: 0))
-
-    parser = argparse.ArgumentParser(
-      description=__doc__,
-      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--port', nargs='?', const=9101, help='The TCP port to listen on.  Defaults to 9101.', default=9101)
-    args = parser.parse_args()
-    log.info(args.port)
-
-    current_data = defaultdict(lambda: 0)
-    current_payment_detail = defaultdict(lambda: defaultdict(lambda: 0))
-    current_large_native_payment_detail = defaultdict(lambda: defaultdict(lambda: 0))
-  
-    REGISTRY.register(StatsCollector())
-    start_http_server(int(args.port))
-
-    h = horizon_livenet()
-    p = {
-      'limit': 200,
-      'cursor': 'now',
-    }
-
-    current_minute = None
-
-    r = h.operations(sse=True, params=p)
     try:
-        for resp in r:
-          try:
-            m = json.loads(str(resp))
-          except json.decoder.JSONDecodeError:
-              pass
+        for resp in operations['_embedded']['records']:
+          
+          cm = resp['created_at'][:-4]
 
-          if m == 'hello':
-            continue
-
-          cm = m['created_at'][:-4]
+          log.info('minute change %s => %s' % (current_minute, cm))
           if cm != current_minute:
              
             log.info('minute change %s => %s' % (current_minute, cm))
+
             current_minute = cm
 
-            previous_data = copy.deepcopy(current_data)
-            previous_payment_detail = copy.deepcopy(current_payment_detail)
-            previous_large_native_payment_detail = copy.deepcopy(current_large_native_payment_detail)
+            global current_data 
+            global current_payment_detail 
+            global current_large_native_payment_detail 
 
-            current_data = defaultdict(lambda: 0)
-            current_payment_detail = defaultdict(lambda: defaultdict(lambda: 0))
-            current_large_native_payment_detail = defaultdict(lambda: defaultdict(lambda: 0))
-
-          op_type = m['type']
+          op_type = resp['type']
 
           current_data['nb_operation'] += 1
           current_data['nb_operation_%s' % op_type] += 1
 
           if op_type == 'payment':
-            current_data['total_amount_payment'] += float(m['amount'])
+            current_data['total_amount_payment'] += float(resp['amount'])
 
-            if m['asset_type'] == 'native':
+            if resp['asset_type'] == 'native':
                 asset = 'native'
 
-                v = float(m['amount'])
-                if v >= LARGE_PAYMENT_MIN_AMOUNT:
+                v = float(resp['amount'])
+                if v >= 10000:
 
-                    from_addr = m['from']
-                    to_addr = m['to']
+                    from_addr = resp['from']
+                    to_addr = resp['to']
                     current_large_native_payment_detail[from_addr][to_addr] += v
 
             else:
-                asset = m['asset_code']
+                asset = resp['asset_code']
 
             current_payment_detail[asset]['nb'] += 1
-            current_payment_detail[asset]['sum'] += float(m['amount'])
+            current_payment_detail[asset]['sum'] += float(resp['amount'])
 
     except requests.exceptions.HTTPError as e:
         log.info(str(e))
@@ -129,10 +103,18 @@ def main_loop():
         return
 
 if __name__ == '__main__':
-  try:
+
+    parser = argparse.ArgumentParser(
+      description=__doc__,
+      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--port', type=int, help='The TCP port to listen on.', default=9101)
+    parser.add_argument('--host', nargs='?', help='The URL exporter will connect.', default="https://horizon.stellar.org")
+    args = parser.parse_args()
+    log.info(args.port)
+    log.info(args.host)
+
+    start_http_server(args.port)
+    REGISTRY.register(StatsCollector())
     while True:
-        main_loop()
-        time.sleep(1)
-  except KeyboardInterrupt:
-    print(" Interrupted")
-    exit(0)
+        main_loop(args.host)
+        time.sleep(10)

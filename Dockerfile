@@ -1,5 +1,5 @@
 FROM python:3.6
-RUN pip install prometheus_client stellar-base
+RUN pip install prometheus_client stellar-sdk
 RUN mkdir -p /opt/stellar-horizon-exporter
 COPY ./Dockerfile /opt/stellar-horizon-exporter/
 COPY ./README.md /opt/stellar-horizon-exporter/
